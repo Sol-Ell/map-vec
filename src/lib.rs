@@ -82,12 +82,11 @@ impl<T> Map<T> for Vec<T, Global> {
 
             let mut at_u = guarded.elem_ptr.cast::<U>();
             let end = unsafe { guarded.elem_ptr.add(guarded.list.len()) };
+            unsafe {
+                while guarded.elem_ptr < end {
+                    let elem = guarded.elem_ptr.read();
+                    let mapped = f(elem);
 
-            while guarded.elem_ptr < end {
-                let elem = unsafe { guarded.elem_ptr.read() };
-                let mapped = f(elem);
-
-                unsafe {
                     if size_of::<T>() == size_of::<U>() {
                         guarded.elem_ptr.cast().write(mapped);
                     } else {
@@ -95,7 +94,7 @@ impl<T> Map<T> for Vec<T, Global> {
                         at_u = at_u.add(1);
                     }
                     guarded.elem_ptr = guarded.elem_ptr.add(1);
-                };
+                }
             }
 
             forget(guarded);
@@ -107,24 +106,23 @@ impl<T> Map<T> for Vec<T, Global> {
         {
             assert!(size_of::<T>() < size_of::<U>());
 
+            let start = list.as_non_null();
             let mut guarded: ClearOnPanic<'_, U, T, A> = ClearOnPanic {
-                elem_ptr: list.as_non_null(),
+                elem_ptr: unsafe { start.add(list.len()) },
                 list,
                 _phantom: PhantomData::<T>,
             };
 
             let mut elem_ptr = guarded.elem_ptr.cast::<T>();
-            let end = unsafe { guarded.elem_ptr.add(guarded.list.len()) };
+            unsafe {
+                while guarded.elem_ptr > start {
+                    elem_ptr = elem_ptr.sub(1);
+                    guarded.elem_ptr = guarded.elem_ptr.sub(1);
 
-            while guarded.elem_ptr < end {
-                let elem = unsafe { elem_ptr.read() };
-                let mapped = f(elem);
+                    let elem = elem_ptr.read();
+                    let mapped = f(elem);
 
-                unsafe {
-                    guarded.elem_ptr.write(mapped);
-
-                    guarded.elem_ptr = guarded.elem_ptr.add(1);
-                    elem_ptr = elem_ptr.add(1);
+                    guarded.elem_ptr.write(mapped)
                 }
             }
 
