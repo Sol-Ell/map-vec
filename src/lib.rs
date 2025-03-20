@@ -65,14 +65,20 @@ impl<T> Map<T> for Vec<T, Global> {
             }
         }
 
-        fn map_forward<T, U, F, A: Allocator>(list: &mut Vec<T, A>, mut f: F)
+        fn map_forward<T, U, F, A: Allocator>(
+            cap_u: usize,
+            mut list: Vec<T, A>,
+            mut f: F,
+        ) -> Vec<U, A>
         where
             F: FnMut(T) -> U,
         {
-            assert!(size_of::<T>() >= size_of::<U>());
+            assert!(size_of::<T>() != 0);
+            assert_eq!(size_of::<T>() % size_of::<U>(), 0);
+
             let mut guarded: ClearOnPanic<'_, T, U, A> = ClearOnPanic {
                 elem_ptr: list.as_non_null(),
-                list,
+                list: &mut list,
                 _phantom: PhantomData::<U>,
             };
 
@@ -94,18 +100,23 @@ impl<T> Map<T> for Vec<T, Global> {
             }
 
             forget(guarded);
+
+            return transmute_list(cap_u, list);
         }
 
-        fn map_backward<T, U, F, A: Allocator>(list: &mut Vec<U, A>, mut f: F)
+        fn map_backward<T, U, F, A: Allocator>(cap_u: usize, list: Vec<T, A>, mut f: F) -> Vec<U, A>
         where
             F: FnMut(T) -> U,
         {
-            assert!(size_of::<T>() < size_of::<U>());
+            assert!(size_of::<U>() != 0);
+            assert_eq!(size_of::<U>() % size_of::<T>(), 0);
 
-            let start = list.as_non_null();
+            let mut converted = transmute_list(cap_u, list);
+
+            let start = converted.as_non_null();
             let mut guarded: ClearOnPanic<'_, U, T, A> = ClearOnPanic {
-                elem_ptr: unsafe { start.add(list.len()) },
-                list,
+                elem_ptr: unsafe { start.add(converted.len()) },
+                list: &mut converted,
                 _phantom: PhantomData::<T>,
             };
 
@@ -123,28 +134,13 @@ impl<T> Map<T> for Vec<T, Global> {
             }
 
             forget(guarded);
-        }
-
-        fn map_in_place<T, U, F, A: Allocator>(mut list: Vec<T, A>, f: F) -> Vec<U, A>
-        where
-            F: FnMut(T) -> U,
-        {
-            fn transmute_list<T, U, A: Allocator>(list: Vec<T, A>) -> Vec<U, A> {
-                let (start, len, cap, alloc) = list.into_parts_with_alloc();
-                let cap_u = convert_capacity(size_of::<T>(), size_of::<U>(), cap);
-
-                unsafe { Vec::from_parts_in(start.cast::<U>(), len, cap_u, alloc) }
-            }
-
-            if size_of::<T>() >= size_of::<U>() {
-                map_forward::<T, U, F, A>(&mut list, f);
-                return transmute_list(list);
-            }
-
-            let mut converted = transmute_list(list);
-            map_backward::<T, U, F, A>(&mut converted, f);
 
             return converted;
+        }
+
+        fn transmute_list<T, U, A: Allocator>(cap_u: usize, list: Vec<T, A>) -> Vec<U, A> {
+            let (start, len, _, alloc) = list.into_parts_with_alloc();
+            unsafe { Vec::from_parts_in(start.cast::<U>(), len, cap_u, alloc) }
         }
 
         const fn convert_capacity(size_of_t: usize, size_of_u: usize, cap_t: usize) -> usize {
@@ -166,23 +162,31 @@ impl<T> Map<T> for Vec<T, Global> {
 
         if size_of_t % size_of_u == 0 {
             if align_of_t >= align_of_u {
-                return map_in_place(self, f);
+                return map_forward(
+                    convert_capacity(size_of_t, size_of_u, self.capacity()),
+                    self,
+                    f,
+                );
             } else if align_of_t.abs_diff(align_of_u).ilog2() == 1 {
                 if self.as_ptr().is_aligned_to(align_of_u) {
-                    return map_in_place(self, f);
+                    return map_forward(
+                        convert_capacity(size_of_t, size_of_u, self.capacity()),
+                        self,
+                        f,
+                    );
                 }
             }
         } else if size_of_u % size_of_t == 0 {
             if align_of_t >= align_of_u {
                 let cap_u = convert_capacity(size_of_t, size_of_u, self.capacity());
                 if cap_u >= self.len() {
-                    return map_in_place(self, f);
+                    return map_backward(cap_u, self, f);
                 }
             } else if align_of_t.abs_diff(align_of_u).ilog2() == 1 {
                 if self.as_ptr().is_aligned_to(align_of_u) {
                     let cap_u = convert_capacity(size_of_t, size_of_u, self.capacity());
                     if cap_u >= self.len() {
-                        return map_in_place(self, f);
+                        return map_backward(cap_u, self, f);
                     }
                 }
             }
